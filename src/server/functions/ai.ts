@@ -10,6 +10,10 @@ const GROQ_TEXT_FALLBACKS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b"];
 const GROQ_VISION_MODEL = getServerEnv("GROQ_VISION_MODEL") || "qwen/qwen3.6-27b";
 const GROQ_VISION_FALLBACKS = ["qwen/qwen3.8-27b"];
 
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 function getGroqKey() {
   const key = getServerEnv("GROQ_API_KEY");
   if (!key) {
@@ -49,6 +53,40 @@ async function groqFetch(body: Record<string, unknown>, timeoutMs: number) {
   }
 }
 
+/** Keep retrying Groq vision models. Never fall back to a text model (it cannot see photos). */
+async function groqVisionChat(body: Record<string, unknown>) {
+  const models = uniqueModels(body.model, GROQ_VISION_FALLBACKS);
+  const deadline = Date.now() + 75000;
+  let delay = 1500;
+
+  while (Date.now() < deadline) {
+    for (const model of models) {
+      let response: Response;
+      try {
+        response = await groqFetch({ ...body, model }, 28000);
+      } catch {
+        continue;
+      }
+
+      if (response.ok) return response.json();
+
+      const errText = await response.text();
+      console.error("Groq vision error", model, response.status, errText);
+
+      const busy = response.status === 429 || response.status === 503;
+      if (!busy && response.status !== 404) {
+        throw new Error(`Groq API failed (${response.status}): ${errText.slice(0, 200)}`);
+      }
+    }
+    await sleep(delay);
+    delay = Math.min(Math.round(delay * 1.5), 8000);
+  }
+
+  throw new Error(
+    "Groq photo models are overloaded right now (503). Your photo was not analysed. Wait 30–60 seconds and send the same photo again."
+  );
+}
+
 async function groqChat(
   body: Record<string, unknown>,
   fallbacks: string[] = [],
@@ -58,29 +96,42 @@ async function groqChat(
   let lastMessage = "Groq API failed.";
 
   for (const model of models) {
-    let response: Response;
-    try {
-      response = await groqFetch({ ...body, model }, timeoutMs);
-    } catch (e) {
-      lastMessage = isTimeoutError(e)
-        ? "The photo AI is still working on Groq's side and hit a wait limit. Send the same photo once more."
-        : e instanceof Error
-          ? e.message
-          : "Network error talking to Groq.";
-      console.error("Groq request failed", model, lastMessage);
-      continue;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      let response: Response;
+      try {
+        response = await groqFetch({ ...body, model }, timeoutMs);
+      } catch (e) {
+        lastMessage = isTimeoutError(e)
+          ? "The photo AI is still working on Groq's side and hit a wait limit. Send the same photo once more."
+          : e instanceof Error
+            ? e.message
+            : "Network error talking to Groq.";
+        console.error("Groq request failed", model, lastMessage);
+        if (attempt < 2) {
+          await sleep(800 * 2 ** attempt);
+          continue;
+        }
+        break;
+      }
+
+      if (response.ok) return response.json();
+
+      const errText = await response.text();
+      lastMessage = `Groq API failed (${response.status}): ${errText.slice(0, 240)}`;
+      console.error("Groq API error", model, response.status, errText);
+
+      const busy = response.status === 429 || response.status === 503;
+      const badModel = response.status === 404 || /model_not_found|does not exist/i.test(errText);
+      const skipModel =
+        response.status === 400 && /image|vision|reasoning|unsupported/i.test(errText);
+
+      if (busy && attempt < 2) {
+        await sleep(1200 * 2 ** attempt);
+        continue;
+      }
+      if (busy || badModel || skipModel) break;
+      throw new Error(lastMessage);
     }
-
-    if (response.ok) return response.json();
-
-    const errText = await response.text();
-    lastMessage = `Groq API failed (${response.status}): ${errText.slice(0, 240)}`;
-    console.error("Groq API error", model, response.status, errText);
-
-    const busy = response.status === 429 || response.status === 503;
-    const badModel = response.status === 404 || /model_not_found|does not exist/i.test(errText);
-    if (busy || badModel) continue;
-    throw new Error(lastMessage);
   }
 
   throw new Error(
@@ -258,29 +309,23 @@ End with: This is only a simple explanation. Follow your doctor, and ask a pharm
       ? data.imageBase64
       : `data:image/jpeg;base64,${data.imageBase64}`;
 
-    const resData = await groqChat(
-      {
-        model: GROQ_VISION_MODEL,
-        temperature: 0.4,
-        reasoning_effort: "none",
-        reasoning_format: "hidden",
-        messages: [
-          { role: "system", content: system },
-          {
-            role: "user",
-            content: [
-              {
-                type: "text",
-                text: "Explain only the medicines in this photo, in very simple words. No thinking out loud.",
-              },
-              { type: "image_url", image_url: { url: dataUrl } },
-            ],
-          },
-        ],
-      },
-      GROQ_VISION_FALLBACKS,
-      45000
-    );
+    const resData = await groqVisionChat({
+      model: GROQ_VISION_MODEL,
+      temperature: 0.4,
+      messages: [
+        { role: "system", content: system },
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: "Explain only the medicines in this photo, in very simple words. No thinking out loud.",
+            },
+            { type: "image_url", image_url: { url: dataUrl } },
+          ],
+        },
+      ],
+    });
 
     const explanation = assistantText(resData.choices?.[0]?.message);
     return { explanation };
@@ -315,26 +360,20 @@ RULES:
       ? `Look at this photo. The patient says: "${note}". Explain simply what you notice and what they should do.`
       : "Look at this photo of a physical symptom. Explain simply what you notice and what the patient should do.";
 
-    const visionRes = await groqChat(
-      {
-        model: GROQ_VISION_MODEL,
-        temperature: 0.3,
-        reasoning_effort: "none",
-        reasoning_format: "hidden",
-        messages: [
-          { role: "system", content: visionSystem },
-          {
-            role: "user",
-            content: [
-              { type: "text", text: userText },
-              { type: "image_url", image_url: { url: dataUrl } },
-            ],
-          },
-        ],
-      },
-      GROQ_VISION_FALLBACKS,
-      45000
-    );
+    const visionRes = await groqVisionChat({
+      model: GROQ_VISION_MODEL,
+      temperature: 0.3,
+      messages: [
+        { role: "system", content: visionSystem },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: userText },
+            { type: "image_url", image_url: { url: dataUrl } },
+          ],
+        },
+      ],
+    });
 
     const assistant = assistantText(visionRes.choices?.[0]?.message);
     if (!assistant) {

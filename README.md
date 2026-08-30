@@ -79,6 +79,26 @@ npm run dev
 
 Open **http://localhost:8080** (or the port Vite prints). Use **localhost**, not the LAN IP, if you need browser GPS — geolocation is blocked on insecure network URLs.
 
+### Production / Render (Node.js)
+
+This project builds with **Nitro** (`node-server` preset), not Cloudflare Workers.
+
+```bash
+npm run build
+npm run start
+# equivalent: node .output/server/index.mjs
+```
+
+The production server listens on **`process.env.PORT`** (or `3000`). On Render, set:
+
+| Setting | Value |
+| --- | --- |
+| Build command | `npm install && npm run build` |
+| Start command | `npm run start` |
+| Node version | **22.12+** (see `engines` in `package.json`) |
+
+Env vars: `MONGODB_URI`, `JWT_SECRET`, `GROQ_API_KEY`.
+
 ---
 
 ## Scripts

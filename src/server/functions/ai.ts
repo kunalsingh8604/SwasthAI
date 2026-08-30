@@ -149,11 +149,31 @@ function stripThinkTags(text: string): string {
     .trim();
 }
 
+/** Remove markdown so chat shows plain, easy-to-read text. */
+function toSimpleWords(text: string): string {
+  return stripThinkTags(text)
+    .replace(/\|\s*-+\s*\|(?:\s*-+\s*\|)*/g, "")
+    .replace(/^\s*\|.*\|\s*$/gm, (line) =>
+      line
+        .split("|")
+        .map((c) => c.trim())
+        .filter(Boolean)
+        .join(" — ")
+    )
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/\*([^*]+)\*/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^\s*[-*]\s+/gm, "• ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 function assistantText(message: { content?: unknown } | undefined): string {
   if (!message) return "";
   const content = message.content;
   if (typeof content !== "string") return "";
-  return stripThinkTags(content);
+  return toSimpleWords(content);
 }
 
 function parseToolArgs(raw: unknown) {
@@ -173,31 +193,29 @@ export const triageAiFn = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const lang = data.language === "hi" ? "Hindi" : "English";
 
-    const system = `You are Swasthya AI, a powerful and compassionate Agentic Health Companion.
-Your goal is to provide the BEST health guidance using available tools and user history.
+    const system = `You are Swasthya AI, a kind health helper for ordinary people (students, parents, elders).
 
 USER CONTEXT:
 ${data.userContext || "No history available yet."}
 
-COMMUNICATION STYLE:
-- Language: ${lang}.
-- Tone: Empathetic, professional, and clear.
-- Avoid jargon. Use simple analogies for complex medical terms.
+HOW TO WRITE (VERY IMPORTANT):
+- Reply ONLY in ${lang}.
+- Use SHORT, SIMPLE everyday words. Write like you are talking to a friend.
+- Keep answers short: about 4–8 short lines or a small bullet list.
+- Do NOT use markdown: no **, no tables with |, no # headings, no long essays.
+- Do NOT use medical jargon (say "dry mouth", not "xerostomia"; say "fast heartbeat", not "tachycardia").
+- Prefer: what it may mean → what to do at home → when to see a doctor.
 
-YOUR CAPABILITIES (TOOLS):
-1. triage_decision: Use this when the user reports symptoms. Classify as emergency, moderate, or mild.
-2. find_nearby_facilities: Use this if the user asks for a hospital, clinic, or pharmacy.
-3. analyze_health_history: Use this if the user asks about trends in their past reports or periods.
-4. provide_first_aid: Provide immediate, safe first-aid steps while waiting for care.
+TOOLS:
+1. triage_decision: when the user reports their own symptoms. Set condition_label and care_type for the map.
+2. find_nearby_facilities: if they ask for hospital / clinic / pharmacy.
+3. analyze_health_history: if they ask about past reports or periods.
+4. provide_first_aid: safe first-aid steps while waiting for care.
 
-IMPORTANT RULES:
-- NEVER prescribe medication or give final diagnoses.
-- For emergencies, ALWAYS prioritize the triage_decision tool and advise immediate hospital visit.
-- When using triage_decision, always set condition_label (simple concern name) and care_type (hospital/clinic/doctor/pharmacy) so the app can open the nearby map for the right care.
-- If history shows recurring symptoms (e.g., frequent fever), mention it and suggest a detailed checkup.
-- Be proactive. If a user asks about a symptom, offer to find a nearby clinic.
-
-Always remind the user that you are an AI and not a replacement for a doctor.`;
+RULES:
+- Never prescribe medicine or give a final disease name as certain.
+- For emergencies, use triage_decision and tell them to go to hospital now.
+- Always say you are an AI, not a doctor.`;
 
     const tools = [
       {

@@ -147,3 +147,5 @@ SwasthAI is an **educational assistant**. It does not diagnose, prescribe, or re
 
 ## License
 
+Private student / project repository. Add a license file if you intend to distribute the code.
+Personal Project
